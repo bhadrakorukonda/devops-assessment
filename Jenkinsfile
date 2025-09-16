@@ -1,17 +1,20 @@
 pipeline {
   agent any
 
-  options { timestamps() }
+  options { 
+    timestamps()
+    ansiColor('xterm')
+    buildDiscarder(logRotator(numToKeepStr: '25'))
+  }
 
   environment {
-    // Tag images per-build: e.g. 0.1.42
+    // Per-build tag: e.g. 0.1.12
     IMAGE_TAG = "0.1.${env.BUILD_NUMBER}"
-    // Docker Hub username/password -> $DOCKERHUB_USR / $DOCKERHUB_PSW
+    // Docker Hub creds -> $DOCKERHUB_USR / $DOCKERHUB_PSW
     DOCKERHUB = credentials('dockerhub-creds')
   }
 
   stages {
-
     stage('Checkout') {
       steps {
         checkout scm
@@ -67,37 +70,42 @@ pipeline {
         sh '''
           set -eu
 
-          # 1) Flatten kubeconfig from Jenkins' ~/.kube using dockerized kubectl
-          TMPKC="/tmp/kubeconfig.minikube"
-          echo "[deploy] Flattening kubeconfig from /var/jenkins_home/.kube ..."
-          docker run --rm --user 0 \
-            --network container:minikube \
-            -v /var/jenkins_home/.kube:/root/.kube:ro \
-            bitnami/kubectl:latest \
-            config view --raw --minify --flatten > "$TMPKC"
+          # --- 1) Find running Minikube container (Docker driver) ---
+          MINIKUBE_C=$(docker ps --filter "name=minikube" --format "{{.Names}}" | head -n1 || true)
+          if [ -z "$MINIKUBE_C" ]; then
+            echo "[deploy] ERROR: Could not find a running Minikube container."
+            echo "         Start it with:  minikube start --driver=docker"
+            exit 1
+          fi
+          echo "[deploy] Using Minikube container: $MINIKUBE_C"
 
-          # 2) Helper to run kubectl inside the minikube netns with the flattened kubeconfig
-          K='docker run --rm --user 0 --network container:minikube \
+          # --- 2) Copy kubeconfig out of Minikube container ---
+          TMPKC="/tmp/kubeconfig.minikube"
+          docker cp "${MINIKUBE_C}:/var/lib/minikube/kubeconfig" "$TMPKC"
+          chmod 600 "$TMPKC"
+          echo "[deploy] Copied kubeconfig -> $TMPKC"
+
+          # --- 3) Helper to run kubectl inside Minikube's netns with our kubeconfig ---
+          K='docker run --rm --user 0 --network container:'"$MINIKUBE_C"' \
                -e KUBECONFIG=/tmp/config \
                -v '"$TMPKC"':'/tmp/config:ro \
                -v '"$PWD"':'/workspace -w /workspace \
                bitnami/kubectl:latest'
 
-          echo "[deploy] Sanity check..."
+          echo "[deploy] Context:"
           $K config current-context || true
-          $K get ns
 
           echo "[deploy] Ensure namespace 'devops' exists..."
           $K get ns devops >/dev/null 2>&1 || $K create ns devops
 
-          echo "[deploy] Applying manifests (namespace devops)..."
+          echo "[deploy] Apply manifests (namespace devops)..."
           $K -n devops apply -f k8s/
 
-          echo "[deploy] Updating images to this build tag..."
+          echo "[deploy] Set images to this build tag..."
           $K -n devops set image deploy/frontend frontend=${DOCKERHUB_USR}/devops-frontend:${IMAGE_TAG} || true
           $K -n devops set image deploy/backend  backend=${DOCKERHUB_USR}/devops-backend:${IMAGE_TAG}  || true
 
-          echo "[deploy] Waiting for rollouts..."
+          echo "[deploy] Wait for rollouts..."
           $K -n devops rollout status deploy/frontend --timeout=120s || true
           $K -n devops rollout status deploy/backend  --timeout=120s || true
 
@@ -119,5 +127,3 @@ pipeline {
     }
   }
 }
-
-    
