@@ -6,10 +6,10 @@ pipeline {
   }
 
   environment {
-    // Tag images per-build: e.g. 0.1.123
+    // Tag images per-build: e.g. 0.1.42
     IMAGE_TAG = "0.1.${env.BUILD_NUMBER}"
 
-    // Bind Docker Hub username/password to DOCKERHUB_USR / DOCKERHUB_PSW
+    // Docker Hub username/password -> $DOCKERHUB_USR / $DOCKERHUB_PSW
     DOCKERHUB = credentials('dockerhub-creds')
   }
 
@@ -65,39 +65,42 @@ pipeline {
         sh '''
           set -eu
 
-          # Build a minimal kubeconfig and repoint it to the node-local API (always 8443 inside minikube netns)
-          TMPKC=/tmp/kubeconfig.minikube
-          kubectl config view --raw --minify --flatten > "$TMPKC"
-          CLUSTER_NAME=$(kubectl --kubeconfig "$TMPKC" config view -o jsonpath='{.clusters[0].name}')
-          kubectl --kubeconfig "$TMPKC" config set-cluster "$CLUSTER_NAME" --server="https://127.0.0.1:8443" >/dev/null
+          # 1) Build an embedded kubeconfig from Jenkins' ~/.kube using dockerized kubectl
+          TMPKC="/tmp/kubeconfig.minikube"
 
-          echo ">>> Current context on host:"
-          kubectl --kubeconfig "$TMPKC" config current-context
+          echo "[deploy] Flattening kubeconfig from /var/jenkins_home/.kube ..."
+          docker run --rm --user 0 \
+            --network container:minikube \
+            -v /var/jenkins_home/.kube:/root/.kube:ro \
+            bitnami/kubectl:latest \
+            kubectl config view --raw --minify --flatten > "$TMPKC"
 
-          # Use kubectl inside a container that shares the minikube container network namespace
-          # so https://127.0.0.1:8443 is reachable.
-          K="docker run --rm --user 0 \
-               --network container:minikube \
+          # 2) Force the apiserver host that works inside the minikube netns
+          sed -i -E 's#server: https://[^[:space:]]+#server: https://127.0.0.1:8443#' "$TMPKC"
+
+          # 3) Handy runner that uses the kubeconfig + joins the minikube network namespace
+          K='docker run --rm --user 0 --network container:minikube \
                -e KUBECONFIG=/tmp/config \
-               -v $TMPKC:/tmp/config:ro \
-               -v $PWD:/workspace -w /workspace \
-               bitnami/kubectl:latest kubectl"
-          # (Optional) Apply manifests if you have them in k8s/
-          if [ -d k8s ]; then
-            echo ">>> Applying manifests in k8s/ ..."
-            $K -n devops apply -f k8s/ || true
-          fi
+               -v '"$TMPKC"':'/tmp/config:ro \
+               -v '"$PWD"':'/workspace -w /workspace \
+               bitnami/kubectl:latest kubectl'
 
-          echo ">>> Set images to the freshly pushed tags ..."
-          $K -n devops set image deploy/frontend frontend=${DOCKERHUB_USR}/devops-frontend:${IMAGE_TAG} --record
-          $K -n devops set image deploy/backend  backend=${DOCKERHUB_USR}/devops-backend:${IMAGE_TAG}  --record
+          echo "[deploy] Sanity check..."
+          $K config current-context || true
+          $K get ns
 
-          echo ">>> Wait for rollouts ..."
-          $K -n devops rollout status deploy/frontend
-          $K -n devops rollout status deploy/backend
+          echo "[deploy] Applying manifests (namespace devops)..."
+          $K -n devops apply -f k8s/
 
-          echo ">>> Done. Current services:"
-          $K -n devops get deploy,svc,ingress -o wide
+          echo "[deploy] Updating images with this build tag..."
+          $K -n devops set image deploy/frontend frontend=${DOCKERHUB_USR}/devops-frontend:${IMAGE_TAG} || true
+          $K -n devops set image deploy/backend  backend=${DOCKERHUB_USR}/devops-backend:${IMAGE_TAG}  || true
+
+          echo "[deploy] Waiting for rollouts..."
+          $K -n devops rollout status deploy/frontend || true
+          $K -n devops rollout status deploy/backend  || true
+
+          echo "[deploy] Done."
         '''
       }
     }
@@ -105,7 +108,6 @@ pipeline {
 
   post {
     always {
-      // Best-effort docker logout so your token isn’t left around
       sh 'docker logout || true'
     }
   }
