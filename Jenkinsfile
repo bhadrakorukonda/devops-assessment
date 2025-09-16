@@ -63,7 +63,7 @@ pipeline {
     stage('Deploy to Kubernetes') {
       steps {
         sh '''
-          set -euo pipefail
+          set -eu
 
           # Build a minimal kubeconfig and repoint it to the node-local API (always 8443 inside minikube netns)
           TMPKC=/tmp/kubeconfig.minikube
@@ -82,7 +82,6 @@ pipeline {
                -v $TMPKC:/tmp/config:ro \
                -v $PWD:/workspace -w /workspace \
                bitnami/kubectl:latest kubectl"
-
           # (Optional) Apply manifests if you have them in k8s/
           if [ -d k8s ]; then
             echo ">>> Applying manifests in k8s/ ..."
