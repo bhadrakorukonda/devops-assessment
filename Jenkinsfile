@@ -1,14 +1,11 @@
 pipeline {
   agent any
 
-  options {
-    timestamps()
-  }
+  options { timestamps() }
 
   environment {
     // Tag images per-build: e.g. 0.1.42
     IMAGE_TAG = "0.1.${env.BUILD_NUMBER}"
-
     // Docker Hub username/password -> $DOCKERHUB_USR / $DOCKERHUB_PSW
     DOCKERHUB = credentials('dockerhub-creds')
   }
@@ -19,6 +16,7 @@ pipeline {
       steps {
         checkout scm
         sh '''
+          set -eu
           pwd
           ls -la
         '''
@@ -28,6 +26,7 @@ pipeline {
     stage('Docker Login') {
       steps {
         sh '''
+          set -eu
           echo "$DOCKERHUB_PSW" | docker login -u "$DOCKERHUB_USR" --password-stdin
         '''
       }
@@ -36,6 +35,7 @@ pipeline {
     stage('Build Frontend Image') {
       steps {
         sh '''
+          set -eu
           test -d frontend
           docker build -t ${DOCKERHUB_USR}/devops-frontend:${IMAGE_TAG} ./frontend
         '''
@@ -45,6 +45,7 @@ pipeline {
     stage('Build Backend Image') {
       steps {
         sh '''
+          set -eu
           test -d backend
           docker build -t ${DOCKERHUB_USR}/devops-backend:${IMAGE_TAG} ./backend
         '''
@@ -54,6 +55,7 @@ pipeline {
     stage('Push Images') {
       steps {
         sh '''
+          set -eu
           docker push ${DOCKERHUB_USR}/devops-frontend:${IMAGE_TAG}
           docker push ${DOCKERHUB_USR}/devops-backend:${IMAGE_TAG}
         '''
@@ -65,40 +67,42 @@ pipeline {
         sh '''
           set -eu
 
-          # 1) Build an embedded kubeconfig from Jenkins' ~/.kube using dockerized kubectl
+          # 1) Flatten kubeconfig from Jenkins' ~/.kube using dockerized kubectl
           TMPKC="/tmp/kubeconfig.minikube"
-
           echo "[deploy] Flattening kubeconfig from /var/jenkins_home/.kube ..."
           docker run --rm --user 0 \
             --network container:minikube \
             -v /var/jenkins_home/.kube:/root/.kube:ro \
             bitnami/kubectl:latest \
-            kubectl config view --raw --minify --flatten > "$TMPKC"
+            config view --raw --minify --flatten > "$TMPKC"
 
-          # 2) Force the apiserver host that works inside the minikube netns
-          sed -i -E 's#server: https://[^[:space:]]+#server: https://127.0.0.1:8443#' "$TMPKC"
-
-          # 3) Handy runner that uses the kubeconfig + joins the minikube network namespace
+          # 2) Helper to run kubectl inside the minikube netns with the flattened kubeconfig
           K='docker run --rm --user 0 --network container:minikube \
                -e KUBECONFIG=/tmp/config \
                -v '"$TMPKC"':'/tmp/config:ro \
                -v '"$PWD"':'/workspace -w /workspace \
-               bitnami/kubectl:latest kubectl'
+               bitnami/kubectl:latest'
 
           echo "[deploy] Sanity check..."
           $K config current-context || true
           $K get ns
 
+          echo "[deploy] Ensure namespace 'devops' exists..."
+          $K get ns devops >/dev/null 2>&1 || $K create ns devops
+
           echo "[deploy] Applying manifests (namespace devops)..."
           $K -n devops apply -f k8s/
 
-          echo "[deploy] Updating images with this build tag..."
+          echo "[deploy] Updating images to this build tag..."
           $K -n devops set image deploy/frontend frontend=${DOCKERHUB_USR}/devops-frontend:${IMAGE_TAG} || true
           $K -n devops set image deploy/backend  backend=${DOCKERHUB_USR}/devops-backend:${IMAGE_TAG}  || true
 
           echo "[deploy] Waiting for rollouts..."
-          $K -n devops rollout status deploy/frontend || true
-          $K -n devops rollout status deploy/backend  || true
+          $K -n devops rollout status deploy/frontend --timeout=120s || true
+          $K -n devops rollout status deploy/backend  --timeout=120s || true
+
+          echo "[deploy] Services:"
+          $K -n devops get svc -o wide || true
 
           echo "[deploy] Done."
         '''
@@ -108,7 +112,12 @@ pipeline {
 
   post {
     always {
-      sh 'docker logout || true'
+      sh '''
+        set +e
+        docker logout || true
+      '''
     }
   }
 }
+
+    
