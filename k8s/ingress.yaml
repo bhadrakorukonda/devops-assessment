@@ -4,22 +4,26 @@ metadata:
   name: app-ingress
   namespace: devops
   annotations:
-    nginx.ingress.kubernetes.io/rewrite-target: /$1
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
 spec:
   ingressClassName: nginx
   rules:
     - host: app.local
       http:
         paths:
-          - path: /(.*)
+          # Frontend at /
+          - path: /
             pathType: Prefix
             backend:
               service:
                 name: frontend
-                port: { number: 80 }
-          - path: /api/?(.*)
+                port:
+                  number: 80
+          # Backend at /api
+          - path: /api
             pathType: Prefix
             backend:
               service:
                 name: backend-service
-                port: { number: 8080 }
+                port:
+                  number: 8080
