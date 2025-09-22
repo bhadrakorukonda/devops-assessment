@@ -1,3 +1,4 @@
+from prometheus_flask_exporter import PrometheusMetrics
 import os
 import psycopg2
 from flask import Flask, jsonify
@@ -69,6 +70,7 @@ from flask import Flask, request
 from prometheus_client import Counter, generate_latest, CONTENT_TYPE_LATEST, REGISTRY
 
 app = Flask(__name__)
+metrics = PrometheusMetrics(app)  # exposes /metrics automatically
 
 # Count requests by endpoint and method
 REQUESTS = Counter("app_requests_total", "Total app requests", ["endpoint", "method"])
