@@ -17,7 +17,12 @@ DB_PASSWORD = os.environ.get("DB_PASSWORD", "S3cureDev!P@ssw0rd_2025")
 def hello():
     return jsonify({"message": "Hello from backend!"})
 
+@app.route("/ping", methods=["GET"])
+def ping():
+    return {"status": "ok"}, 200
+
 @app.route('/api/dbcheck')
+@app.route('/dbcheck')
 def dbcheck():
     try:
         conn = psycopg2.connect(
@@ -57,3 +62,21 @@ def dbcheck():
 if __name__ == "__main__":
     # 0.0.0.0 so it’s reachable in the container
     app.run(host="0.0.0.0", port=5000)
+
+
+# app.py
+from flask import Flask, request
+from prometheus_client import Counter, generate_latest, CONTENT_TYPE_LATEST, REGISTRY
+
+app = Flask(__name__)
+
+# Count requests by endpoint and method
+REQUESTS = Counter("app_requests_total", "Total app requests", ["endpoint", "method"])
+
+@app.before_request
+def _count():
+    REQUESTS.labels(endpoint=request.path, method=request.method).inc()
+
+@app.get("/metrics")
+def metrics():
+    return generate_latest(REGISTRY), 200, {"Content-Type": CONTENT_TYPE_LATEST}
